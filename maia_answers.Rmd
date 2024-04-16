@@ -9,22 +9,253 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+**Load packages and import data**
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+```{r, echo = TRUE}
+library(dplyr)
+library(tidyr)
+library(stats)
+library(Hmisc)
+library(waldo)
+library(ggplot2)
+library(purrr)
+library(reshape2)
+library(tibble)
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+tag <- "202311081903"
+base_url <- "https://github.com/randrescastaneda/pub_data/raw/"
+data_url <- paste0(base_url, tag, "/data/Rtest1/")
 
-```{r cars}
-summary(cars)
+wdi <- readr::read_rds(paste0(data_url, "wdi_in1.Rds"))
 ```
 
-## Including Plots
+# Question 1: Summary statistics of GDP per capita by region
 
-You can also embed plots, for example:
+```{r}
+correct_answers1 <- readr::read_rds(paste0(data_url, "wdi_summ_out.Rds"))
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+maia_answers1 <- wdi %>% 
+  filter(!is.na(gdp)) %>% # Filter out NA observations for GDP
+  group_by(region, date) %>% 
+  summarise(N = n(),
+            Mean = weighted.mean(gdp, w = pop),
+            # use wtd.var function from Hmisc package to get weighted variance
+            variance = wtd.var(gdp, w = pop), 
+            # weighted SD is square root of weighted variance
+            SD = sqrt(variance),
+            Min = min(gdp),
+            Max = max(gdp)) %>% 
+  select(-variance)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+**Compare my answers with the correct answers:**
+```{r}
+waldo::compare(correct_answers1, maia_answers1,
+               tolerance = 0.0001)
+```
+
+Note that the only differences are in variable types/names; all values are the same. 
+
+# Question 2: Aggregate stats
+
+```{r}
+correct_answers2 <- readr::read_rds(paste0(data_url, "wdi_agg_out.Rds"))
+
+maia_answers2 <- wdi %>% 
+  select(region, date, pop, gdp, lifeex, pov_intl) %>% 
+  pivot_longer(cols = c(gdp, lifeex, pov_intl),
+               names_to = "var") %>% 
+  group_by(region, date, var) %>% 
+  summarise(mean = weighted.mean(value, w = pop, na.rm = T),
+            sd = sqrt(wtd.var(value, w = pop, na.rm = T)),
+            min = min(value, na.rm = T),
+            max = max(value, na.rm = T),
+            # wtd.quantile function from Hmisc package calcs weighted median
+            median = wtd.quantile(value, w = pop, probs = 0.5, na.rm = T),
+            pop = sum(pop)) %>% 
+  # change long format of data to match the correct answers 
+  pivot_longer(cols = c(mean, sd, min, max, median),
+               names_to = "estimate") %>% 
+  pivot_wider(names_from = var, values_from = value) %>% 
+  # arrange the dataframe in the same order as the correct answers for comparison
+  mutate(estimate = factor(estimate, levels = c("mean", "sd", "min", "max", "median"))) %>% 
+  arrange(estimate)
+```
+
+**Compare my answers with the correct answers:**
+```{r}
+waldo::compare(correct_answers2, maia_answers2,
+               tolerance = 0.0001,
+               max_diffs = Inf)
+```
+
+Note that the only differences are in variable types/names; all values are the same. 
+
+# Question 3: Find outliers
+
+```{r}
+
+correct_answers3 <- readr::read_rds(paste0(data_url, "wdi_outliers_out.Rds"))
+
+# Calculate the weighted mean and standard deviation of gdp, lifeex and gini 
+# Then the upper and lower bounds as 2.5 SDs from the mean
+
+CI_2.5 <- wdi %>% 
+  select(date, pop, gdp, lifeex, gini) %>% 
+  pivot_longer(cols = c(gdp, lifeex, gini),
+               names_to = "var") %>% 
+  filter(!is.na(value)) %>% 
+  group_by(date, var) %>% 
+  summarise(mean = weighted.mean(value, w = pop),
+            sd = sqrt(wtd.var(value, w = pop))) %>% 
+  mutate(lower = mean - 2.5*sd,
+         upper = mean + 2.5*sd) %>% 
+  pivot_wider(names_from = var, values_from = c(mean, sd, lower, upper))
+
+# Combine mean, SD, lower and upper limits for each year with full data 
+# To create indicator of which observations are outliers 
+
+maia_answers3 <- wdi %>% 
+  left_join(., CI_2.5, by = "date") %>% 
+  mutate(hl_lifeex = if_else(lifeex > upper_lifeex, T, F),
+         ll_lifeex = if_else(lifeex < lower_lifeex, T, F),
+         hl_gdp = if_else(gdp > upper_gdp, T, F),
+         ll_gdp = if_else(gdp < lower_gdp, T, F),
+         hl_gini = if_else(gini > upper_gini, T, F),
+         ll_gini = if_else(gini < lower_gini, T, F)) %>% 
+  select(-contains(c("lower", "upper")))
+
+```
+
+**Compare my answers with the correct answers:**
+```{r}
+waldo::compare(correct_answers3, maia_answers3,
+               tolerance = 0.0001,
+               max_diffs = Inf)
+```
+
+Note that the only differences are in variable types/names; all values are the same. 
+
+**Plot of the results:**
+
+```{r}
+ggplot() +
+  geom_ribbon(data = CI_2.5, 
+              aes(x = date, ymin = lower_lifeex, ymax = upper_lifeex),
+              fill = "grey",
+              alpha = 0.5) +
+  geom_point(data = wdi, aes(x = date, y = lifeex, color = region), size = 1) +
+  geom_line(data = CI_2.5, aes(x = date, y = mean_lifeex)) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+# Question 4: Poverty measures
+
+**Import data:**
+```{r}
+l_svy <- readr::read_rds(paste0(data_url, "svy_sim_in1.Rds"))
+```
+
+**Estimate the poverty headcount, poverty gap, and poverty severity–i.e., Foster-Greer-Thorbecke indices (FGT)–for each year using the global poverty lines of $2.15, $3.65, and $6.85 in 2017 PPP prices.**
+
+```{r}
+correct_answers4 <- readr::read_rds(paste0(data_url, "dt_pov_out.Rds"))
+
+# Set values
+
+pov_lines <- c(2.15, 3.65, 6.85)
+alphas <- c(0, 1, 2)
+indices <- c("headcount", "povgap", "povseverity")
+
+# Write function 'calc_fgt' to compute poverty headcount, gap and severity indices
+# Takes poverty line and alpha (from FGT index formula) as an input 
+
+calc_fgt <- function(year, threshold, alpha) {
+  pov_dummy <- if_else(year$income < threshold, 1, 0)
+  pov_distance <- 1 - (year$income / threshold)
+  pov_index <- weighted.mean((pov_dummy * (pov_distance)^alpha), w = year$weight)
+  return(pov_index)
+}
+
+# Create list vector to store the results
+
+fgt_list <- vector("list", length(l_svy))
+
+# Run a loop over each survey year, for each value of alpha and poverty line
+# Results get stored in list format
+
+for (i in seq_along(l_svy)) {
+  index_type <- lapply(alphas, function(alpha) {
+    pov_line <- lapply(pov_lines, function(threshold) {
+      calc_fgt(l_svy[[i]], threshold, alpha)
+    })
+    names(pov_line) <- pov_lines
+    return(pov_line) 
+  })
+  names(index_type) <- indices
+  fgt_list[[i]] <- index_type
+}
+
+years <- seq(2001, 2010)
+names(fgt_list) <- years
+
+# Convert results to a dataframe using melt 
+
+maia_answers4 <- reshape2::melt(fgt_list) %>% 
+  rename(year = L1,
+         pov_line = L3) %>% 
+  pivot_wider(names_from = L2, values_from = value)
+```
+
+**Compare my answers with the correct answers:**
+```{r}
+waldo::compare(correct_answers4, maia_answers4,
+               tolerance = 0.0001,
+               max_diffs = Inf)
+```
+
+Note that the only differences are in variable types/names; all values are the same. 
+
+**Plot the results:**
+```{r}
+ggplot(data = maia_answers4,
+       aes(x = year, y = headcount, color = pov_line)) +
+  geom_line(aes(group = pov_line)) +
+  geom_point() +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+# Question 5: Lorenz curve
+
+```{r}
+correct_answers5 <- readr::read_rds(paste0(data_url, "dt_lorenz_out.Rds"))
+```
+
+**Plot the answers:**
+```{r}
+ggplot(data = correct_answers5,
+       aes(x = cum_population, y = cum_welfare, color = factor(year))) +
+  geom_line(aes(group = year)) +
+  theme_minimal() + 
+  scale_color_discrete(name = "year")
+```
+
+# Question 6: Gini coefficient
+
+```{r}
+correct_answers6 <- readr::read_rds(paste0(data_url, "dt_gini_out.Rds"))
+```
+
+**Plot the answers:**
+```{r}
+ggplot(data = correct_answers6,
+       aes(x = year, y = gini)) +
+  geom_line() +
+  geom_point() +
+  theme_minimal()
+```
+
+
+
